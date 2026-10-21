@@ -55,3 +55,7 @@ commit SHA to control upgrades.
 
 This repository holds built files only; it is published from the 7key
 source on each release.
+
+## License
+
+Copyright (C) 2026 Linh BE. Licensed under the [GNU AGPL-3.0](LICENSE). "7key" is a trademark of Linh BE.
