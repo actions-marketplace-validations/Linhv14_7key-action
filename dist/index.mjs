@@ -13,13 +13,17 @@ function utf8Decode(b) {
 }
 function toBase64(bytes) {
   let s = "";
-  for (const byte of bytes) s += String.fromCharCode(byte);
+  for (const byte of bytes) {
+    s += String.fromCharCode(byte);
+  }
   return btoa(s);
 }
 function fromBase64(b64) {
   const s = atob(b64);
   const out = new Uint8Array(s.length);
-  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+  for (let i = 0; i < s.length; i++) {
+    out[i] = s.charCodeAt(i);
+  }
   return out;
 }
 function fromBase64Url(s) {
@@ -50,8 +54,16 @@ var VaultError = class extends Error {
   params;
 };
 
+// src/core/json.ts
+function isPlainObject(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 // src/core/crypto.ts
 var KEY_BYTES = 32;
+function isSealedData(value) {
+  return isPlainObject(value) && typeof value.ciphertext === "string" && typeof value.nonce === "string";
+}
 async function importAesKey(raw) {
   return crypto.subtle.importKey("raw", raw, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
 }
@@ -80,6 +92,9 @@ async function importVaultKey(raw) {
 // src/core/identity.ts
 var CURVE = { name: "ECDH", namedCurve: "P-256" };
 var WRAP_INFO = utf8Encode("personal-vault/key-wrap/v1");
+function isWrappedForRecipient(value) {
+  return isPlainObject(value) && typeof value.ephemeralPublicKey === "string" && isSealedData(value.sealed);
+}
 async function importPublic(spki) {
   return crypto.subtle.importKey("spki", fromBase64(spki), CURVE, false, []);
 }
@@ -147,6 +162,11 @@ function parseLinkReference(text) {
 function linkKeyContext(linkId, generation) {
   return utf8Encode(`personal-vault/link-key/${linkId}/${generation}`);
 }
+function isCiResponse(value) {
+  return isPlainObject(value) && typeof value.projectId === "string" && typeof value.environmentId === "string" && typeof value.generation === "number" && isWrappedForRecipient(value.wrappedKey) && Array.isArray(value.secrets) && value.secrets.every(
+    (secret) => isPlainObject(secret) && typeof secret.id === "string" && isSealedData(secret.sealed)
+  );
+}
 async function openCiResponse(repoKey, linkId, response) {
   const environmentKey = new Uint8Array(
     await unwrapForRecipient(
@@ -189,15 +209,22 @@ async function githubIdToken(audience, env = process.env, request = fetch) {
   const target = new URL(url);
   target.searchParams.set("audience", audience);
   const response = await request(target, { headers: { Authorization: `Bearer ${bearer}` } });
-  if (!response.ok) throw new CiError(`GitHub refused an OIDC token (${response.status})`);
-  const { value } = await response.json();
-  if (!value) throw new CiError("GitHub returned an empty OIDC token");
+  if (!response.ok) {
+    throw new CiError(`GitHub refused an OIDC token (${response.status})`);
+  }
+  const body = await response.json();
+  const value = isPlainObject(body) ? body.value : void 0;
+  if (typeof value !== "string" || !value) {
+    throw new CiError("GitHub returned an empty OIDC token");
+  }
   return value;
 }
 async function fetchSecrets(options) {
   const request = options.fetch ?? fetch;
   const reference = parseLinkReference(options.link);
-  if (!reference) throw new CiError("The link should look like <organization>.<link>");
+  if (!reference) {
+    throw new CiError("The link should look like <organization>.<link>");
+  }
   const server = new URL(options.server).origin;
   const token = await githubIdToken(server, options.env, request);
   const response = await request(`${server}/api/ci/secrets`, {
@@ -209,7 +236,11 @@ async function fetchSecrets(options) {
     const { error } = await response.json().catch(() => ({}));
     throw new CiError(`7key refused the request (${response.status}): ${error ?? "unknown error"}`);
   }
-  return openCiResponse(options.repoKey, reference.linkId, await response.json());
+  const body = await response.json();
+  if (!isCiResponse(body)) {
+    throw new CiError("7key sent a response this version cannot read; update the action");
+  }
+  return openCiResponse(options.repoKey, reference.linkId, body);
 }
 function maskCommands(secrets) {
   return secrets.filter((secret) => secret.kind !== "variable").flatMap((secret) => secret.value.split(/\r?\n/)).filter((line) => line.trim().length > 0).map((line) => `::add-mask::${line}`);
@@ -225,8 +256,12 @@ ${delimiter}
 }
 async function exportToGithubEnv(secrets, env = process.env, write = (line) => console.log(line)) {
   const file = env.GITHUB_ENV;
-  if (!file) throw new CiError("GITHUB_ENV is not set; this only works inside GitHub Actions");
-  for (const command of maskCommands(secrets)) write(command);
+  if (!file) {
+    throw new CiError("GITHUB_ENV is not set; this only works inside GitHub Actions");
+  }
+  for (const command of maskCommands(secrets)) {
+    write(command);
+  }
   await appendFile(file, githubEnvBlock(secrets));
 }
 
@@ -241,8 +276,12 @@ try {
     repoKey: input("key")
   });
   await exportToGithubEnv(secrets);
-  console.log(`7key: loaded ${secrets.length} values into the job environment`);
+  process.stdout.write(`7key: loaded ${secrets.length} values into the job environment
+`);
 } catch (error) {
-  console.log(`::error::7key: ${error instanceof Error ? error.message : String(error)}`);
+  process.stdout.write(
+    `::error::7key: ${error instanceof Error ? error.message : String(error)}
+`
+  );
   process.exit(1);
 }
